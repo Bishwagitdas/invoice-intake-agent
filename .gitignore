@@ -1,0 +1,16 @@
+__pycache__/
+.venv/
+.env
+outputs/*.json
+*.pyc
+
+# Streamlit
+.streamlit/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
