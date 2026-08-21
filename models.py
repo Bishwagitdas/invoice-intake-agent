@@ -1,13 +1,16 @@
-from typing import Optional, List
+from typing import List, Optional
+
 from pydantic import BaseModel, Field
+
 
 class InvoiceLine(BaseModel):
     description: str
     quantity: Optional[int] = None
-    unit: str
+    unit: Optional[str] = None
     unit_price: Optional[int] = None
     amount: int
     tax_code: str
+
 
 class InvoiceData(BaseModel):
     partner_name: str
@@ -22,8 +25,9 @@ class InvoiceData(BaseModel):
     total_amount: int
     registration_number: Optional[str] = None
 
+
 class ExtractionResult(BaseModel):
     invoice: InvoiceData
     confidence: float = Field(ge=0, le=1)
-    warnings: List[str] = []
-    evidence: List[str] = []
+    warnings: List[str] = Field(default_factory=list)
+    evidence: List[str] = Field(default_factory=list)

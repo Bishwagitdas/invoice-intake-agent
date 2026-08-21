@@ -15,64 +15,279 @@ from prompts import SYSTEM_PROMPT
 
 load_dotenv()
 
+
 class InvoiceExtractor:
     def __init__(self):
-        key = os.getenv("OPENAI_API_KEY")
-        if not key:
-            raise RuntimeError("OPENAI_API_KEY is not set. Copy .env.example to .env and add your key.")
-        self.client = OpenAI(api_key=key)
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        api_key = os.getenv("LLM_API_KEY")
+
+        if not api_key:
+            raise RuntimeError("LLM_API_KEY is not set.")
+
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=os.getenv(
+                "LLM_BASE_URL",
+                "https://api.openai.com/v1"
+            ),
+        )
+
+        self.model = os.getenv(
+            "LLM_MODEL",
+            "gpt-4o-mini"
+        )
 
     def _pdf_text(self, path: Path) -> str:
         doc = fitz.open(path)
-        return "\n".join(page.get_text("text") for page in doc).strip()
+
+        try:
+            return "\n".join(
+                page.get_text("text")
+                for page in doc
+            ).strip()
+        finally:
+            doc.close()
 
     def _pdf_images(self, path: Path) -> List[str]:
         doc = fitz.open(path)
-        out = []
-        for page in doc:
-            pix = page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
-            out.append("data:image/png;base64," + base64.b64encode(pix.tobytes("png")).decode())
-        return out
+        images = []
+
+        try:
+            for page in doc:
+                pix = page.get_pixmap(
+                    matrix=fitz.Matrix(0.8, 0.8),
+                    alpha=False
+                )
+
+                images.append(
+                    "data:image/jpeg;base64,"
+                    + base64.b64encode(
+                        pix.tobytes("jpeg", jpg_quality=50)
+                    ).decode()
+                )
+
+        finally:
+            doc.close()
+
+        return images
 
     def _image_data_url(self, path: Path) -> str:
         with Image.open(path) as img:
-            buf = io.BytesIO()
-            img.convert("RGB").save(buf, format="PNG")
-            return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+            buffer = io.BytesIO()
+
+            img.thumbnail((1400, 1400))
+
+            img.convert("RGB").save(
+                buffer,
+                format="JPEG",
+                quality=70
+            )
+
+            return (
+                "data:image/jpeg;base64,"
+                + base64.b64encode(
+                    buffer.getvalue()
+                ).decode()
+            )
+
+    def _parse_json(self, content: str) -> dict:
+        if not content:
+            raise ValueError("Empty response from LLM.")
+
+        content = content.strip()
+
+        if "```" in content:
+            content = content.replace("```json", "")
+            content = content.replace("```", "")
+            content = content.strip()
+
+        start = content.find("{")
+
+        if start == -1:
+            raise ValueError(
+                "LLM response does not contain JSON."
+            )
+
+        decoder = json.JSONDecoder()
+
+        try:
+            data, _ = decoder.raw_decode(
+                content[start:]
+            )
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"Invalid JSON returned by LLM: {error}"
+            ) from error
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                "LLM response is not a JSON object."
+            )
+
+        if "invoice" not in data:
+            raise ValueError(
+                "LLM response does not contain 'invoice'."
+            )
+
+        if "confidence" not in data:
+            raise ValueError(
+                "LLM response does not contain 'confidence'."
+            )
+
+        return data
 
     def extract(self, path: Path) -> ExtractionResult:
         suffix = path.suffix.lower()
         content = []
+
         if suffix == ".pdf":
             text = self._pdf_text(path)
+
             if text:
-                content.append({"type": "text", "text": "PDF text layer:\n" + text})
-            # Always provide rendered pages too; this catches table/layout information.
-            for img in self._pdf_images(path):
-                content.append({"type": "image_url", "image_url": {"url": img}})
-        elif suffix in {".png", ".jpg", ".jpeg", ".webp"}:
-            content.append({"type": "image_url", "image_url": {"url": self._image_data_url(path)}})
+                content.append({
+                    "type": "text",
+                    "text": (
+                        "Invoice text:\n"
+                        + text[:5000]
+                    )
+                })
+
+            images = self._pdf_images(path)
+
+            for image in images:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image
+                    }
+                })
+
+        elif suffix in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp"
+        }:
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": self._image_data_url(path)
+                }
+            })
+
         else:
-            raise ValueError(f"Unsupported file type: {path}")
+            raise ValueError(
+                f"Unsupported file type: {path}"
+            )
 
-        schema = ExtractionResult.model_json_schema()
-        user_text = """Extract this invoice. Use the JSON schema exactly.
-Do not calculate values that are not supported by the document.
-For tax, map 10% -> T10 and 8% -> T08.
-Confidence is your confidence in the overall extraction, not OCR confidence.
+        prompt = """
+Extract this invoice.
 
-JSON schema:
-""" + json.dumps(schema, ensure_ascii=False)
+Return ONLY ONE valid JSON object.
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": [{"type": "text", "text": user_text}] + content},
-            ],
-        )
-        data = json.loads(response.choices[0].message.content)
-        return ExtractionResult.model_validate(data)
+Required fields:
+
+{
+  "invoice": {
+    "partner_name": "",
+    "partner_code": null,
+    "invoice_number": "",
+    "issue_date": "YYYY-MM-DD",
+    "due_date": "YYYY-MM-DD",
+    "currency": "JPY",
+    "lines": [],
+    "subtotal": 0,
+    "tax_amount": 0,
+    "total_amount": 0,
+    "registration_number": null
+  },
+  "confidence": 0.0,
+  "warnings": [],
+  "evidence": []
+}
+
+Line format:
+
+{
+  "description": "",
+  "quantity": null,
+  "unit": null,
+  "unit_price": null,
+  "amount": 0,
+  "tax_code": "T10"
+}
+
+Rules:
+- JSON only.
+- No markdown.
+- No explanations.
+- Include all required fields.
+- Preserve Japanese text.
+- Do not invent information.
+- Use null for missing optional values.
+- Dates must be YYYY-MM-DD.
+- Currency is JPY.
+- 10% = T10.
+- 8% = T08.
+- Use printed line amounts.
+- Confidence must be between 0 and 1.
+- Add warnings when information is unclear.
+"""
+
+        last_error = None
+
+        for attempt in range(2):
+
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    temperature=0,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": SYSTEM_PROMPT
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                }
+                            ] + content
+                        }
+                    ]
+                )
+
+                raw = response.choices[0].message.content
+
+                data = self._parse_json(raw)
+
+                return ExtractionResult.model_validate(data)
+
+            except Exception as error:
+
+                last_error = error
+
+                if attempt == 0:
+                    prompt = """
+Return the invoice again.
+
+IMPORTANT:
+Return exactly ONE JSON object.
+
+The root object MUST contain:
+
+- invoice
+- confidence
+- warnings
+- evidence
+
+Do not return a line item as the root object.
+Do not return markdown.
+Do not return explanations.
+Do not return multiple JSON objects.
+
+Return JSON only.
+"""
+
+        raise last_error

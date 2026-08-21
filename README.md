@@ -44,7 +44,7 @@ JSON Audit Record
 ## Requirements
 
 * Python 3.11+
-* OpenAI-compatible API key
+* OpenAI-compatible LLM API key
 * Internet connection for LLM API access
 
 > Python 3.14 may work, but Python 3.11–3.13 is recommended for best package compatibility.
@@ -83,8 +83,9 @@ pip install -r requirements.txt
 Create a `.env` file in the project root:
 
 ```env
-OPENAI_API_KEY=your_api_key_here
-OPENAI_MODEL=your_vision_model
+LLM_API_KEY=your_api_key_here
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
 ACCOUNTING_API_URL=http://127.0.0.1:8000
 ACCOUNTING_API_KEY=your_accounting_api_key
 ```
